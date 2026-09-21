@@ -53,10 +53,10 @@ tool, which refreshes it.
     ./build.sh       # compile to build/AIUsageBar
     ./install.sh     # start now and at every login
 
-On first launch macOS asks whether AIUsageBar may read the
-"Claude Code-credentials" Keychain item. Enter your Mac login password and
-choose **Always Allow**. Every rebuild produces a new binary, so the prompt
-comes back once per rebuild.
+The Claude token is read through `/usr/bin/security`, the same tool Claude Code
+uses to write it, so macOS never shows a Keychain permission dialog. (Reading
+the item directly from the app did prompt: Claude Code rewrites the item on
+every token refresh, which wipes any "Always Allow" grant within hours.)
 
 Useful commands:
 

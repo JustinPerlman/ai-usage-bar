@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 // Reads tokens other tools already keep on this Mac and calls the same usage
 // endpoints those tools call. Read-only: this file never refreshes, rotates,
@@ -27,17 +26,25 @@ private func send(_ request: URLRequest, owner: String) async throws -> Data {
 
 struct ClaudeCredentials { let accessToken: String; let plan: String? }
 
+// Claude Code keeps its OAuth token in the login Keychain and rewrites the item
+// with `security add-generic-password -U` on every token refresh. That rewrite
+// resets the item's access list, so a grant given to this binary through the
+// "Always Allow" dialog is lost within hours. The `security` tool created the
+// item and stays on its access list, so reading through it never prompts.
 func readClaudeCredentials() throws -> ClaudeCredentials {
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "Claude Code-credentials",
-        kSecReturnData as String: true,
-        kSecMatchLimit as String: kSecMatchLimitOne,
-    ]
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    guard status == errSecSuccess, let data = item as? Data else {
-        throw UsageError.credentialsUnavailable("Keychain item 'Claude Code-credentials' unreadable (status \(status)); is Claude Code logged in?")
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+    let stdout = Pipe()
+    process.standardOutput = stdout
+    process.standardError = FileHandle.nullDevice
+    do { try process.run() } catch {
+        throw UsageError.credentialsUnavailable("could not run /usr/bin/security: \(error.localizedDescription)")
+    }
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw UsageError.credentialsUnavailable("Keychain item 'Claude Code-credentials' unreadable (security exit \(process.terminationStatus)); is Claude Code logged in?")
     }
     guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
           let oauth = root["claudeAiOauth"] as? [String: Any],

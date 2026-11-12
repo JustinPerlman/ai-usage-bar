@@ -82,12 +82,14 @@ struct CodexUsage: Equatable, Sendable {
 
 enum UsageError: LocalizedError, Equatable {
     case missingField(String)
+    case invalidField(String)
     case credentialsUnavailable(String)
     case unauthorized(String)
     case http(Int)
 
     var errorDescription: String? {
         switch self {
+        case .invalidField(let field): return "response has invalid \(field)"
         case .missingField(let field): return "response missing \(field)"
         case .credentialsUnavailable(let why): return why
         case .unauthorized(let who): return "\(who) token rejected; open \(who) to refresh it"
@@ -97,6 +99,30 @@ enum UsageError: LocalizedError, Equatable {
 }
 
 // MARK: - Parsing
+
+// Preserve legitimate overage percentages, but reject values that cannot be
+// safely displayed as an integer. Provider values never reach conversion unchecked.
+private func validatePercent(_ value: Double, field: String) throws {
+    guard value.isFinite, value >= 0, value < Double(Int.max) else {
+        throw UsageError.invalidField(field)
+    }
+}
+
+private func validatedDate(_ seconds: Double) throws -> Date {
+    guard seconds.isFinite, (0...253_402_300_799).contains(seconds) else {
+        throw UsageError.invalidField("reset timestamp")
+    }
+    return Date(timeIntervalSince1970: seconds)
+}
+
+private func resetDate(at: Double?, after: Double?, now: Date) throws -> Date? {
+    if let at { return try validatedDate(at) }
+    if let after {
+        guard after.isFinite, after >= 0 else { throw UsageError.invalidField("reset interval") }
+        return try validatedDate(now.timeIntervalSince1970 + after)
+    }
+    return nil
+}
 
 private struct ClaudeResponse: Decodable {
     struct Money: Decodable { let amountMinor: Int; let currency: String; let exponent: Int }
@@ -112,7 +138,7 @@ struct FlexibleDate: Decodable {
     let date: Date?
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        if let seconds = try? container.decode(Double.self) { date = Date(timeIntervalSince1970: seconds); return }
+        if let seconds = try? container.decode(Double.self) { date = try validatedDate(seconds); return }
         if let text = try? container.decode(String.self) {
             let iso = ISO8601DateFormatter()
             iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -130,15 +156,24 @@ func parseClaudeUsage(_ data: Data, plan: String? = nil) throws -> ClaudeUsage {
 
     var spend: ClaudeSpend?
     if let used = response.spend?.used, let limit = response.spend?.limit {
+        guard used.amountMinor >= 0, limit.amountMinor >= 0,
+              (0...9).contains(used.exponent), used.exponent == limit.exponent,
+              used.currency == limit.currency else {
+            throw UsageError.invalidField("spend amounts or units")
+        }
+        if limit.amountMinor > 0 {
+            try validatePercent(Double(used.amountMinor) * 100 / Double(limit.amountMinor), field: "spend percent")
+        }
         spend = ClaudeSpend(usedMinor: used.amountMinor, limitMinor: limit.amountMinor,
                             exponent: used.exponent, currency: used.currency)
     }
 
-    func window(_ raw: ClaudeResponse.Window?, _ label: String) -> ClaudeWindow? {
+    func window(_ raw: ClaudeResponse.Window?, _ label: String) throws -> ClaudeWindow? {
         guard let raw, let utilization = raw.utilization else { return nil }
+        try validatePercent(utilization, field: "utilization")
         return ClaudeWindow(label: label, utilization: utilization, resetsAt: raw.resetsAt?.date)
     }
-    let windows = [window(response.fiveHour, "5-hour limit"), window(response.sevenDay, "Weekly limit")].compactMap { $0 }
+    let windows = try [window(response.fiveHour, "5-hour limit"), window(response.sevenDay, "Weekly limit")].compactMap { $0 }
 
     guard spend != nil || !windows.isEmpty else { throw UsageError.missingField("spend limit or rate limits") }
     return ClaudeUsage(plan: plan, spend: spend, windows: windows)
@@ -181,7 +216,10 @@ private struct FlexibleNumber: Decodable {
         let number: Double?
         if let text = try? container.decode(String.self) { number = Double(text) }
         else { number = try? container.decode(Double.self) }
-        value = number.flatMap { $0.isFinite ? $0 : nil }
+        if let number, !number.isFinite || number < 0 {
+            throw UsageError.invalidField("credit amount")
+        }
+        value = number
     }
 }
 
@@ -190,11 +228,13 @@ func parseCodexUsage(_ data: Data, now: Date = Date()) throws -> CodexUsage {
     decoder.keyDecodingStrategy = .convertFromSnakeCase
     let response = try decoder.decode(CodexResponse.self, from: data)
 
-    func window(_ raw: CodexResponse.Window?) -> CodexWindow? {
+    func window(_ raw: CodexResponse.Window?) throws -> CodexWindow? {
         guard let raw, let used = raw.usedPercent else { return nil }
-        var reset: Date?
-        if let at = raw.resetAt { reset = Date(timeIntervalSince1970: at) }
-        else if let after = raw.resetAfterSeconds { reset = now.addingTimeInterval(after) }
+        try validatePercent(used, field: "used percent")
+        if let seconds = raw.limitWindowSeconds, seconds <= 0 {
+            throw UsageError.invalidField("limit window seconds")
+        }
+        let reset = try resetDate(at: raw.resetAt, after: raw.resetAfterSeconds, now: now)
         return CodexWindow(usedPercent: used, windowSeconds: raw.limitWindowSeconds, resetAt: reset)
     }
 
@@ -205,9 +245,9 @@ func parseCodexUsage(_ data: Data, now: Date = Date()) throws -> CodexUsage {
         let percent = raw.usedPercent ?? used.flatMap { used in
             limit.flatMap { $0 > 0 ? used * 100 / $0 : nil }
         }
-        if let percent, percent.isFinite {
-            let reset = raw.resetAt.map { Date(timeIntervalSince1970: $0) }
-                ?? raw.resetAfterSeconds.map { now.addingTimeInterval($0) }
+        if let percent {
+            try validatePercent(percent, field: "spend percent")
+            let reset = try resetDate(at: raw.resetAt, after: raw.resetAfterSeconds, now: now)
             spend = CodexSpend(used: used, limit: limit, remaining: raw.remaining?.value,
                                unit: raw.unit, usedPercent: percent, resetAt: reset)
         }
@@ -215,8 +255,8 @@ func parseCodexUsage(_ data: Data, now: Date = Date()) throws -> CodexUsage {
 
     return CodexUsage(planType: response.planType,
                       spend: spend,
-                      primary: window(response.rateLimit?.primaryWindow),
-                      secondary: window(response.rateLimit?.secondaryWindow),
+                      primary: try window(response.rateLimit?.primaryWindow),
+                      secondary: try window(response.rateLimit?.secondaryWindow),
                       unlimitedCredits: response.credits?.unlimited ?? false,
                       limitReached: response.rateLimitReachedType != nil || response.spendControl?.reached == true)
 }

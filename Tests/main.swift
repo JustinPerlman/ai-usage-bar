@@ -124,6 +124,41 @@ do {
     check(try parseCodexUsage(partial).shortStatus, "n/a", "incomplete spending limit stays unavailable")
 } catch { check(false, "unexpected error \(error)") }
 
+// Malformed server data must throw instead of crashing during UI conversion.
+print("Untrusted numeric response bounds")
+let invalidCodex = [
+    #"{"rate_limit":{"primary_window":{"used_percent":1e100}}}"#,
+    #"{"rate_limit":{"primary_window":{"used_percent":-1}}}"#,
+    #"{"rate_limit":{"primary_window":{"used_percent":1,"reset_at":1e100}}}"#,
+    #"{"rate_limit":{"primary_window":{"used_percent":1,"reset_after_seconds":-1}}}"#,
+    #"{"spend_control":{"individual_limit":{"used_percent":1e100}}}"#,
+    #"{"spend_control":{"individual_limit":{"used":"1e308","limit":"0.01"}}}"#,
+    #"{"spend_control":{"individual_limit":{"used":"-1","limit":"100"}}}"#,
+    #"{"spend_control":{"individual_limit":{"used":"Infinity","limit":"100"}}}"#
+]
+for fixture in invalidCodex {
+    do { _ = try parseCodexUsage(Data(fixture.utf8)); check(false, "invalid Codex numeric response accepted") }
+    catch UsageError.invalidField { check(true, "invalid Codex numeric response rejected") }
+    catch { check(false, "wrong error: \(error)") }
+}
+let invalidClaude = [
+    #"{"five_hour":{"utilization":1e100}}"#,
+    #"{"five_hour":{"utilization":-1}}"#,
+    #"{"five_hour":{"utilization":1,"resets_at":1e100}}"#,
+    #"{"spend":{"used":{"amount_minor":9223372036854775807,"currency":"USD","exponent":2},"limit":{"amount_minor":1,"currency":"USD","exponent":2}}}"#,
+    #"{"spend":{"used":{"amount_minor":-9223372036854775808,"currency":"USD","exponent":2},"limit":{"amount_minor":1,"currency":"USD","exponent":2}}}"#,
+    #"{"spend":{"used":{"amount_minor":1,"currency":"USD","exponent":-1000},"limit":{"amount_minor":1,"currency":"USD","exponent":-1000}}}"#
+]
+for fixture in invalidClaude {
+    do { _ = try parseClaudeUsage(Data(fixture.utf8)); check(false, "invalid Claude numeric response accepted") }
+    catch UsageError.invalidField { check(true, "invalid Claude numeric response rejected") }
+    catch { check(false, "wrong error: \(error)") }
+}
+do {
+    let overage = try parseCodexUsage(Data(#"{"rate_limit":{"primary_window":{"used_percent":125.5}}}"#.utf8))
+    check(overage.shortStatus, "125%", "legitimate overage is preserved")
+} catch { check(false, "overage rejected: \(error)") }
+
 // MARK: Dates and text
 print("Dates and text")
 let reset = nextMonthStartUTC(after: now)

@@ -15,7 +15,7 @@ private func send(_ request: URLRequest, owner: String) async throws -> Data {
     request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.timeoutInterval = 20
-    let (data, response) = try await URLSession.shared.data(for: request)
+    let (data, response) = try await usageSession.data(for: request)
     let code = (response as? HTTPURLResponse)?.statusCode ?? 0
     if code == 401 || code == 403 { throw UsageError.unauthorized(owner) }
     guard (200..<300).contains(code) else { throw UsageError.http(code) }

@@ -11,8 +11,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "AI usage")
-        item.button?.imagePosition = .imageLeading
         statusItem = item
         render()
         refresh()
@@ -40,20 +38,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let claudeUsage = try? claude?.get()
         let codexUsage = try? codex?.get()
         let title = NSMutableAttributedString()
-        title.append(segment("Claude", status: claudeUsage?.shortStatus ?? "n/a",
+        title.append(segment(ServiceIcons.claude, status: claudeUsage?.shortStatus ?? "n/a",
                              percent: claudeUsage?.percent, alarm: false))
         title.append(NSAttributedString(string: "  "))
-        title.append(segment("Codex", status: codexUsage?.shortStatus ?? "n/a",
+        title.append(segment(ServiceIcons.codex, status: codexUsage?.shortStatus ?? "n/a",
                              percent: codexUsage?.percent, alarm: codexUsage?.limitReached ?? false))
         item.button?.attributedTitle = title
+        // Keep one point on each outer edge; inter-item spacing belongs to macOS.
+        item.length = ceil(title.size().width) + 2
+        let description = menubarText(claude: claudeUsage?.shortStatus ?? "n/a",
+                                      codex: codexUsage?.shortStatus ?? "n/a")
+        item.button?.toolTip = description
+        item.button?.setAccessibilityLabel(description)
         item.menu = buildMenu()
     }
 
-    private func segment(_ name: String, status: String, percent: Int?, alarm: Bool) -> NSAttributedString {
+    private func segment(_ icon: NSImage, status: String, percent: Int?, alarm: Bool) -> NSAttributedString {
         var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.menuBarFont(ofSize: 0)]
         if alarm || (percent ?? 0) >= 90 { attributes[.foregroundColor] = NSColor.systemRed }
         else if (percent ?? 0) >= 75 { attributes[.foregroundColor] = NSColor.systemOrange }
-        return NSAttributedString(string: "\(name) \(status)", attributes: attributes)
+        let attachment = NSTextAttachment()
+        attachment.image = icon
+        attachment.bounds = NSRect(x: 0, y: -3, width: 14, height: 14)
+        let segment = NSMutableAttributedString(attachment: attachment)
+        segment.append(NSAttributedString(string: " \(status)", attributes: attributes))
+        return segment
     }
 
     private func buildMenu() -> NSMenu {

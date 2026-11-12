@@ -50,16 +50,26 @@ struct CodexWindow: Equatable, Sendable {
     }
 }
 
+struct CodexSpend: Equatable, Sendable {
+    let used: Double?
+    let limit: Double?
+    let remaining: Double?
+    let unit: String?
+    let usedPercent: Double
+    let resetAt: Date?
+}
+
 struct CodexUsage: Equatable, Sendable {
     let planType: String?
+    let spend: CodexSpend?
     let primary: CodexWindow?
     let secondary: CodexWindow?
     let unlimitedCredits: Bool
     let limitReached: Bool
 
-    // The binding limit is whichever window is fuller. Nil when the plan has no metered windows.
+    // Show the fullest spending or rate limit. Nil when no metered limit is reported.
     var percent: Int? {
-        let values = [primary, secondary].compactMap { $0?.usedPercent }
+        let values = [spend?.usedPercent, primary?.usedPercent, secondary?.usedPercent].compactMap { $0 }
         return values.max().map { Int($0) }
     }
 
@@ -143,12 +153,36 @@ private struct CodexResponse: Decodable {
     }
     struct RateLimit: Decodable { let primaryWindow: Window?; let secondaryWindow: Window? }
     struct Credits: Decodable { let unlimited: Bool? }
-    struct SpendControl: Decodable { let reached: Bool? }
+    struct SpendControl: Decodable {
+        struct IndividualLimit: Decodable {
+            let unit: String?
+            let limit: FlexibleNumber?
+            let used: FlexibleNumber?
+            let remaining: FlexibleNumber?
+            let usedPercent: Double?
+            let resetAt: Double?
+            let resetAfterSeconds: Double?
+        }
+        let reached: Bool?
+        let individualLimit: IndividualLimit?
+    }
     let planType: String?
     let rateLimit: RateLimit?
     let rateLimitReachedType: String?
     let credits: Credits?
     let spendControl: SpendControl?
+}
+
+// Credit amounts are strings in the usage endpoint; accept JSON numbers too.
+private struct FlexibleNumber: Decodable {
+    let value: Double?
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let number: Double?
+        if let text = try? container.decode(String.self) { number = Double(text) }
+        else { number = try? container.decode(Double.self) }
+        value = number.flatMap { $0.isFinite ? $0 : nil }
+    }
 }
 
 func parseCodexUsage(_ data: Data, now: Date = Date()) throws -> CodexUsage {
@@ -164,7 +198,23 @@ func parseCodexUsage(_ data: Data, now: Date = Date()) throws -> CodexUsage {
         return CodexWindow(usedPercent: used, windowSeconds: raw.limitWindowSeconds, resetAt: reset)
     }
 
+    var spend: CodexSpend?
+    if let raw = response.spendControl?.individualLimit {
+        let used = raw.used?.value
+        let limit = raw.limit?.value
+        let percent = raw.usedPercent ?? used.flatMap { used in
+            limit.flatMap { $0 > 0 ? used * 100 / $0 : nil }
+        }
+        if let percent, percent.isFinite {
+            let reset = raw.resetAt.map { Date(timeIntervalSince1970: $0) }
+                ?? raw.resetAfterSeconds.map { now.addingTimeInterval($0) }
+            spend = CodexSpend(used: used, limit: limit, remaining: raw.remaining?.value,
+                               unit: raw.unit, usedPercent: percent, resetAt: reset)
+        }
+    }
+
     return CodexUsage(planType: response.planType,
+                      spend: spend,
                       primary: window(response.rateLimit?.primaryWindow),
                       secondary: window(response.rateLimit?.secondaryWindow),
                       unlimitedCredits: response.credits?.unlimited ?? false,
@@ -234,6 +284,30 @@ func codexLines(_ usage: CodexUsage, now: Date, timeZone: TimeZone = .current) -
         var line = "\(window.label) \(Int(window.usedPercent))%"
         if let reset = window.resetAt { line += " · resets \(formatReset(reset, now: now, timeZone: timeZone))" }
         return line
+    }
+    if let spend = usage.spend {
+        var details: [String] = []
+        if let used = spend.used, let limit = spend.limit {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.locale = Locale(identifier: "en_US")
+            formatter.maximumFractionDigits = 2
+            func amount(_ value: Double) -> String {
+                formatter.string(from: NSNumber(value: value)) ?? String(value)
+            }
+            let unit = spend.unit == "credit" ? "credits" : (spend.unit ?? "units")
+            var line = "\(amount(used)) of \(amount(limit)) \(unit)"
+            if let remaining = spend.remaining { line += " · \(amount(remaining)) left" }
+            details.append(line)
+        }
+        if let reset = spend.resetAt {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US")
+            formatter.timeZone = timeZone
+            formatter.dateFormat = "MMM d, h:mm a"
+            details.append("Resets in \(daysUntil(reset, from: now)) days (\(formatter.string(from: reset)))")
+        }
+        lines.insert(contentsOf: details, at: 0)
     }
     if lines.isEmpty {
         lines.append(usage.unlimitedCredits ? "Unlimited credits, no rate limits" : "No rate limits reported")

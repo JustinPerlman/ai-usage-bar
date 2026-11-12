@@ -9,6 +9,9 @@ two usage endpoints the tools themselves already call.
 
     Claude 85%  Codex OK
 
+The menu bar uses compact white Claude and Codex logos on transparent backgrounds,
+with each usage percentage to its right. Hover for service names.
+
 Click it for the detail:
 
     Claude (Enterprise)
@@ -25,7 +28,7 @@ Click it for the detail:
 | Provider | Source | Shown |
 |----------|--------|-------|
 | Claude | Claude Code's OAuth token in Keychain, and the usage endpoint behind Claude Code's `/usage` command | Monthly spend against the plan limit (Enterprise/Team), or the 5-hour and 7-day rate limits on plans that have them |
-| Codex | `~/.codex/auth.json` and the Codex rate-limit endpoint | 5-hour and weekly rate limits when metered, `OK` when the plan is unmetered, `LIMITED` when OpenAI reports a cap reached |
+| Codex | `~/.codex/auth.json` and the Codex rate-limit endpoint | Individual spending limits (credits and reset date), or 5-hour and weekly rate limits when metered, `OK` when the plan is unmetered, `LIMITED` when OpenAI reports a cap reached |
 
 The ChatGPT chat app is not shown. It exposes no usage data locally and OpenAI
 has no consumer usage API.
@@ -47,7 +50,7 @@ tool, which refreshes it.
 
 ## Install
 
-    git clone https://github.com/Yiddish-Gambino3487/ai-usage-bar.git
+    git clone https://github.com/JustinPerlman/ai-usage-bar.git
     cd ai-usage-bar
     ./test.sh        # run the fixture tests
     ./build.sh       # compile to build/AIUsageBar

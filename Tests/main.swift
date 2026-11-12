@@ -100,6 +100,30 @@ do {
     check(codexLines(usage, now: now), ["No rate limits reported", "Limit reached"], "dropdown flags the limit")
 } catch { check(false, "unexpected error \(error)") }
 
+print("Codex Business spending limit (synthetic values, production response shape)")
+let spendJSON = """
+{"plan_type":"business","rate_limit":null,"credits":{"unlimited":false},
+ "spend_control":{"reached":false,"individual_limit":{"unit":"credit",
+ "limit":"100000","used":"12345.67","remaining":"87654.33",
+ "used_percent":12,"reset_at":1796083200,"reset_after_seconds":1574910}}}
+""".data(using: .utf8)!
+do {
+    let usage = try parseCodexUsage(spendJSON, now: now)
+    check(usage.shortStatus, "12%", "use server spending percentage")
+    check(usage.spend?.limit, 100000, "parse string credit amounts")
+    check(codexLines(usage, now: now, timeZone: eastern),
+          ["12,345.67 of 100,000 credits · 87,654.33 left",
+           "Resets in 75 days (Nov 30, 7:00 PM)"], "display amounts and reset countdown without redundant percentage")
+    let combined = #"{"rate_limit":{"primary_window":{"used_percent":80}},"spend_control":{"reached":true,"individual_limit":{"used":25,"limit":100,"reset_after_seconds":60}}}"#.data(using: .utf8)!
+    let mixed = try parseCodexUsage(combined, now: now)
+    check(mixed.spend?.usedPercent, 25, "numeric amounts and percentage fallback")
+    check(mixed.spend?.resetAt, now.addingTimeInterval(60), "spending reset fallback")
+    check(mixed.percent, 80, "fullest limit wins across spend and rate windows")
+    check(mixed.shortStatus, "LIMITED", "reached spending cap overrides percentage")
+    let partial = #"{"spend_control":{"individual_limit":{"used":"invalid","limit":"0"}}}"#.data(using: .utf8)!
+    check(try parseCodexUsage(partial).shortStatus, "n/a", "incomplete spending limit stays unavailable")
+} catch { check(false, "unexpected error \(error)") }
+
 // MARK: Dates and text
 print("Dates and text")
 let reset = nextMonthStartUTC(after: now)

@@ -57,7 +57,7 @@ tool, which refreshes it.
     ./install.sh     # start now and at every login
 
 The Claude token is read through `/usr/bin/security`, the same tool Claude Code
-uses to write it, so macOS never shows a Keychain permission dialog. (Reading
+uses to write it. Whether macOS prompts depends on the item’s access settings. (Reading
 the item directly from the app did prompt: Claude Code rewrites the item on
 every token refresh, which wipes any "Always Allow" grant within hours.)
 
@@ -100,3 +100,25 @@ new binary.
   has not been observed. If yours renders oddly, open an issue with the output
   of `--check`.
 - Refresh interval is fixed at 5 minutes.
+
+## Security and sharing
+
+Build from source in a directory only your user can modify. The installer runs
+as your user, verifies the executable, and validates the LaunchAgent before
+restarting the app. It does not need sudo. Moving the checkout requires reinstalling.
+
+The app reads existing provider access tokens; these are sensitive credentials,
+not dedicated read-only usage tokens. It sends them only to the fixed HTTPS usage
+endpoints in `Sources/Fetch.swift`. Networking uses an ephemeral session with
+caching, cookies, and credential storage disabled, and refuses all redirects.
+System certificate validation remains enabled. This does not clear any caches
+created by older versions or prevent operating-system memory/crash diagnostics.
+
+No tokens are included in the repository or intentionally logged. `--check`
+prints account usage, so review its output before sharing. Test amounts added by
+this fork are synthetic. The original upstream history is retained.
+
+Share the repository rather than a copy of your working directory or `build/`.
+The locally built executable is not a notarized distribution package. Each user
+must have the supported local login files and permissions; provider endpoints
+can change without notice. Follow your organization's rules for credential access.

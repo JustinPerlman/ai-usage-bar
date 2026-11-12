@@ -1,21 +1,27 @@
 #!/bin/zsh
-# Installs a LaunchAgent so the menubar app starts at login and restarts if it crashes.
-# Quit from the menu exits cleanly and is not restarted. Re-run after ./build.sh to relaunch.
+# Installs a per-user LaunchAgent; never run this script with sudo.
 set -euo pipefail
 cd "$(dirname "$0")"
+if (( EUID == 0 )); then
+    print -u2 'Run this installer as your normal user, without sudo.'
+    exit 1
+fi
+binary="$PWD/build/AIUsageBar"
+if [[ ! -f "$binary" || ! -x "$binary" ]]; then
+    print -u2 'App executable is missing or not executable; run ./build.sh first.'
+    exit 1
+fi
+umask 077
 label=local.ai-usage-bar
-plist=~/Library/LaunchAgents/$label.plist
-cat > "$plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$PWD/build/AIUsageBar</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardErrorPath</key><string>$PWD/build/stderr.log</string>
-</dict></plist>
-PLIST
+agent_directory=~/Library/LaunchAgents
+mkdir -p "$agent_directory"
+plist="$agent_directory/$label.plist"
+temporary_plist=$(mktemp "$agent_directory/.$label.XXXXXX")
+trap 'rm -f -- "$temporary_plist"' EXIT
+/bin/zsh scripts/write-launch-agent.sh "$binary" "$PWD/build/stderr.log" "$temporary_plist"
+# Replace only after generation and validation succeed; existing service stays
+# running if preparation fails. Rename also avoids following a target symlink.
+mv -f -- "$temporary_plist" "$plist"
 launchctl bootout gui/$(id -u)/$label 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) "$plist"
 echo "installed and started $label"

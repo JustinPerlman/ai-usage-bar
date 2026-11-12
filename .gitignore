@@ -1,1 +1,6 @@
 build/
+.DS_Store
+.env
+.env.*
+auth.json
+*.log

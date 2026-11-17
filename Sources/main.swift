@@ -8,7 +8,7 @@ if CommandLine.arguments.contains("--check") {
         switch await attempt({ try await fetchClaudeUsage() }) {
         case .success(let usage):
             let readings = claudePace(usage, now: now)
-            print("Claude \(usage.plan ?? "") \(usage.shortStatus)" + (worstPace(readings).map { " (\($0.label))" } ?? ""))
+            print("Claude \(usage.plan ?? "") \(usage.shortStatus)" + (servicePace(readings, limitReached: usage.limitReached).map { " (\($0.label))" } ?? ""))
             (claudeLines(usage, now: now) + readings.map(\.line)).forEach { print("  \($0)") }
         case .failure(let error):
             print("Claude unavailable: \(error.localizedDescription)")
@@ -16,7 +16,7 @@ if CommandLine.arguments.contains("--check") {
         switch await attempt({ try await fetchCodexUsage() }) {
         case .success(let usage):
             let readings = codexPace(usage, now: now)
-            print("Codex \(usage.planType ?? "") \(usage.shortStatus)" + (worstPace(readings).map { " (\($0.label))" } ?? ""))
+            print("Codex \(usage.planType ?? "") \(usage.shortStatus)" + (servicePace(readings, limitReached: usage.anyLimitReached).map { " (\($0.label))" } ?? ""))
             (codexLines(usage, now: now) + readings.map(\.line)).forEach { print("  \($0)") }
         case .failure(let error):
             print("Codex unavailable: \(error.localizedDescription)")

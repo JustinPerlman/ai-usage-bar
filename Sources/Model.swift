@@ -36,6 +36,12 @@ struct ClaudeUsage: Equatable, Sendable {
     }
 
     var shortStatus: String { percent.map { "\($0)%" } ?? "n/a" }
+
+    // Any limit used up, including the 5-hour window that pace ignores.
+    var limitReached: Bool {
+        if let spend, spend.limitMinor > 0, spend.usedMinor >= spend.limitMinor { return true }
+        return windows.contains { $0.utilization >= 100 }
+    }
 }
 
 struct CodexWindow: Equatable, Sendable {
@@ -71,6 +77,12 @@ struct CodexUsage: Equatable, Sendable {
     var percent: Int? {
         let values = [spend?.usedPercent, primary?.usedPercent, secondary?.usedPercent].compactMap { $0 }
         return values.max().map { Int($0) }
+    }
+
+    // Reported as reached, or any limit at 100%, including the 5-hour window.
+    var anyLimitReached: Bool {
+        limitReached || [spend?.usedPercent, primary?.usedPercent, secondary?.usedPercent]
+            .contains { ($0 ?? 0) >= 100 }
     }
 
     var shortStatus: String {
@@ -336,7 +348,7 @@ func daysUntil(_ date: Date, from now: Date) -> Int {
 // is the share of the limit left over the share of weekday time left: 1.0 means
 // exactly on pace, below 1.0 means usage is running ahead of the calendar.
 enum Pace: Int, Comparable, Sendable {
-    case green, yellow, orange, red
+    case green, yellow, orange, red, limited
 
     static func < (lhs: Pace, rhs: Pace) -> Bool { lhs.rawValue < rhs.rawValue }
 
@@ -346,6 +358,7 @@ enum Pace: Int, Comparable, Sendable {
         case .yellow: return "running a bit fast"
         case .orange: return "running fast"
         case .red: return "running out"
+        case .limited: return "limit reached"
         }
     }
 }
@@ -399,7 +412,10 @@ private func monthBefore(_ date: Date) -> Date? {
 
 private func reading(_ label: String, used: Double, start: Date?, end: Date?, now: Date,
                      timeZone: TimeZone) -> PaceReading? {
-    guard let start, let end, let left = weekdaysLeft(start: start, end: end, now: now, timeZone: timeZone)
+    // A reset already in the past means the reading is from the previous cycle
+    // (kept on screen during a 429 back-off); it says nothing about this one.
+    guard let start, let end, end > now,
+          let left = weekdaysLeft(start: start, end: end, now: now, timeZone: timeZone)
     else { return nil }
     return PaceReading(label: label, usedPercent: used, weekdaysLeft: left)
 }
@@ -444,6 +460,11 @@ func codexPace(_ usage: CodexUsage, now: Date, timeZone: TimeZone = .current) ->
 }
 
 func worstPace(_ readings: [PaceReading]) -> Pace? { readings.map(\.pace).max() }
+
+// The service's overall color: a used-up limit of any length wins over pace.
+func servicePace(_ readings: [PaceReading], limitReached: Bool) -> Pace? {
+    limitReached ? .limited : worstPace(readings)
+}
 
 // MARK: - Formatting
 

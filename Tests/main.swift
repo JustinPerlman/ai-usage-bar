@@ -243,5 +243,82 @@ check(worstPace(codexPace(codexWeekly, now: monday.addingTimeInterval(2.5 * 86_4
 check(menubarText(claude: "60%", codex: "30%", claudePace: .yellow, codexPace: .green),
       "Claude 60% (running a bit fast)  Codex 30% (on pace)", "tooltip includes pace")
 
+// MARK: Pace edge cases
+print("Pace edge cases")
+let midweek = monday.addingTimeInterval(2.5 * 86_400)
+func near(_ a: Double?, _ b: Double) -> Bool { a.map { abs($0 - b) < 0.0001 } ?? false }
+
+// Claude monthly spend, Eastern time: cycle is Aug 31 8 PM to Sep 30 8 PM EDT (22 weekdays);
+// from Thu Sep 17 9:52 AM, 9.4222 weekdays remain.
+func claudeSpend(_ used: Int, _ limit: Int) -> ClaudeUsage {
+    ClaudeUsage(plan: nil, spend: ClaudeSpend(usedMinor: used, limitMinor: limit, exponent: 2, currency: "USD"), windows: [])
+}
+let spendPace = claudePace(claudeSpend(50_000, 100_000), now: now, timeZone: eastern)
+check(spendPace.map(\.label), ["Spend"], "Claude spend is paced")
+check(near(spendPace.first?.weekdaysLeft, 226.1333 / 528), true, "Claude spend weekdays left in Eastern time")
+check(worstPace(spendPace), .green, "Claude spend 50% with 43% of weekdays left is green")
+check(worstPace(claudePace(claudeSpend(80_000, 100_000), now: now, timeZone: eastern)), .orange,
+      "Claude spend 80% with 43% of weekdays left is orange")
+check(claudePace(claudeSpend(0, 0), now: now, timeZone: eastern), [], "zero spend limit is skipped")
+
+// Codex spend: cycle is the calendar month before the reset.
+let decFirst = Date(timeIntervalSince1970: 1_796_083_200) // 2026-12-01 00:00 UTC
+let novFirst = Date(timeIntervalSince1970: 1_793_491_200) // 2026-11-01 00:00 UTC
+let nov17 = Date(timeIntervalSince1970: 1_794_916_800)    // 2026-11-17 12:00 UTC
+let codexSpendUsage = CodexUsage(planType: nil,
+    spend: CodexSpend(used: 13, limit: 100, remaining: 87, unit: "credit", usedPercent: 13, resetAt: decFirst),
+    primary: nil, secondary: nil, unlimitedCredits: false, limitReached: false)
+let codexSpendPace = codexPace(codexSpendUsage, now: nov17, timeZone: utc)
+check(codexSpendPace.map(\.label), ["Spend"], "Codex spend is paced")
+check(codexSpendPace.first?.weekdaysLeft, weekdaysLeft(start: novFirst, end: decFirst, now: nov17, timeZone: utc),
+      "Codex spend cycle starts a month before the reset")
+
+// Daylight saving: Sat Oct 31 to Sat Nov 7 in Los Angeles crosses the Nov 1 clock change.
+let pacific = TimeZone(identifier: "America/Los_Angeles")!
+var laCalendar = Calendar(identifier: .gregorian)
+laCalendar.timeZone = pacific
+let dstStart = laCalendar.date(from: DateComponents(year: 2026, month: 10, day: 31))!
+let dstEnd = laCalendar.date(from: DateComponents(year: 2026, month: 11, day: 7))!
+let dstNoon = laCalendar.date(from: DateComponents(year: 2026, month: 11, day: 4, hour: 12))!
+check(weekdaysLeft(start: dstStart, end: dstEnd, now: dstNoon, timeZone: pacific), 0.5,
+      "Wednesday noon is halfway through a week that crosses the DST change")
+
+// Overage, missing reset, and a reset already past.
+let over = ClaudeUsage(plan: nil, spend: nil, windows: [ClaudeWindow(label: "Weekly limit", utilization: 150, resetsAt: nextMonday)])
+let overPace = claudePace(over, now: midweek, timeZone: utc)
+check(worstPace(overPace), .red, "usage over 100% is red")
+check(overPace.first?.line, "Weekly limit 150% used · 50% of weekdays left", "overage line")
+let noReset = ClaudeUsage(plan: nil, spend: nil, windows: [ClaudeWindow(label: "Weekly limit", utilization: 60, resetsAt: nil)])
+check(claudePace(noReset, now: midweek, timeZone: utc), [], "window without a reset time is skipped")
+let afterReset = nextMonday.addingTimeInterval(3_600)
+check(claudePace(weekly, now: afterReset, timeZone: utc), [], "Claude reading past its reset is dropped")
+check(codexPace(codexWeekly, now: afterReset, timeZone: utc), [], "Codex reading past its reset is dropped")
+check(codexPace(codexSpendUsage, now: decFirst, timeZone: utc), [], "Codex spend at its reset instant is dropped")
+
+// A used-up limit of any length makes the service red.
+let fiveHourOut = ClaudeUsage(plan: nil, spend: nil, windows: [
+    ClaudeWindow(label: "5-hour limit", utilization: 100, resetsAt: nextMonday),
+    ClaudeWindow(label: "Weekly limit", utilization: 20, resetsAt: nextMonday)])
+check(fiveHourOut.limitReached, true, "Claude 5-hour window at 100% counts as limit reached")
+check(servicePace(claudePace(fiveHourOut, now: midweek, timeZone: utc), limitReached: fiveHourOut.limitReached),
+      .limited, "Claude used-up 5-hour window beats an on-pace weekly")
+check(claudeSpend(100_000, 100_000).limitReached, true, "Claude spend at its limit counts as reached")
+check(weekly.limitReached, false, "Claude under every limit is not reached")
+check(servicePace(claudePace(weekly, now: midweek, timeZone: utc), limitReached: weekly.limitReached),
+      .yellow, "without a used-up limit the pace color is kept")
+let codexFlagged = CodexUsage(planType: nil, spend: nil,
+    primary: CodexWindow(usedPercent: 40, windowSeconds: 18_000, resetAt: nextMonday),
+    secondary: CodexWindow(usedPercent: 30, windowSeconds: 604_800, resetAt: nextMonday),
+    unlimitedCredits: false, limitReached: true)
+check(servicePace(codexPace(codexFlagged, now: midweek, timeZone: utc), limitReached: codexFlagged.anyLimitReached),
+      .limited, "Codex reported as limited is red")
+check(codexWeekly.anyLimitReached, false, "Codex 5-hour at 99% is not reached")
+let codexFiveHourOut = CodexUsage(planType: nil, spend: nil,
+    primary: CodexWindow(usedPercent: 100, windowSeconds: 18_000, resetAt: nextMonday),
+    secondary: nil, unlimitedCredits: false, limitReached: false)
+check(codexFiveHourOut.anyLimitReached, true, "Codex 5-hour at 100% counts as reached")
+check(menubarText(claude: "100%", codex: "LIMITED", claudePace: .limited, codexPace: .limited),
+      "Claude 100% (limit reached)  Codex LIMITED (limit reached)", "tooltip says limit reached")
+
 print(failures == 0 ? "\nAll checks passed" : "\n\(failures) check(s) FAILED")
 exit(failures == 0 ? 0 : 1)

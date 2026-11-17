@@ -16,8 +16,13 @@ private func send(_ request: URLRequest, owner: String) async throws -> Data {
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.timeoutInterval = 20
     let (data, response) = try await usageSession.data(for: request)
-    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+    let http = response as? HTTPURLResponse
+    let code = http?.statusCode ?? 0
     if code == 401 || code == 403 { throw UsageError.unauthorized(owner) }
+    if code == 429 {
+        let retryAfter = parseRetryAfter(http?.value(forHTTPHeaderField: "Retry-After"), now: Date())
+        throw UsageError.rateLimited(retryAfter: retryAfter)
+    }
     guard (200..<300).contains(code) else { throw UsageError.http(code) }
     return data
 }

@@ -86,6 +86,7 @@ enum UsageError: LocalizedError, Equatable {
     case credentialsUnavailable(String)
     case unauthorized(String)
     case http(Int)
+    case rateLimited(retryAfter: TimeInterval?)
 
     var errorDescription: String? {
         switch self {
@@ -94,6 +95,58 @@ enum UsageError: LocalizedError, Equatable {
         case .credentialsUnavailable(let why): return why
         case .unauthorized(let who): return "\(who) token rejected; open \(who) to refresh it"
         case .http(let code): return "HTTP \(code)"
+        case .rateLimited: return "rate limited (HTTP 429)"
+        }
+    }
+}
+
+// MARK: - Rate limiting
+
+// Retry-After is either delta-seconds or an HTTP date (RFC 9110 section 10.2.3).
+func parseRetryAfter(_ header: String?, now: Date) -> TimeInterval? {
+    guard let raw = header?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+    if let seconds = Double(raw) { return seconds.isFinite && seconds >= 0 ? seconds : nil }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(identifier: "GMT")
+    formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+    guard let date = formatter.date(from: raw) else { return nil }
+    return max(0, date.timeIntervalSince(now))
+}
+
+// Without Retry-After, wait 5, 10, 20, then 30 minutes. A server-supplied
+// delay wins but is capped at an hour so a bogus header cannot stall the app.
+func rateLimitDelay(strikes: Int, retryAfter: TimeInterval?) -> TimeInterval {
+    if let retryAfter { return min(retryAfter, 3_600) }
+    let doublings = Double(min(max(strikes, 1), 4) - 1)
+    return min(300 * pow(2, doublings), 1_800)
+}
+
+// One service's display state. A 429 keeps the last good reading on screen
+// and schedules the next automatic attempt; any other failure clears it.
+struct Feed<Usage> {
+    private(set) var usage: Usage?
+    private(set) var usageAt: Date?
+    private(set) var error: Error?
+    private(set) var strikes = 0
+    private(set) var retryAt: Date?
+
+    var isStale: Bool { usage != nil && error != nil }
+
+    func isDue(_ now: Date) -> Bool { retryAt.map { now >= $0 } ?? true }
+
+    mutating func record(_ result: Result<Usage, Error>, now: Date) {
+        switch result {
+        case .success(let value):
+            usage = value; usageAt = now; error = nil; strikes = 0; retryAt = nil
+        case .failure(let failure):
+            error = failure
+            if case UsageError.rateLimited(let retryAfter) = failure {
+                strikes += 1
+                retryAt = now.addingTimeInterval(rateLimitDelay(strikes: strikes, retryAfter: retryAfter))
+            } else {
+                usage = nil; usageAt = nil; strikes = 0; retryAt = nil
+            }
         }
     }
 }

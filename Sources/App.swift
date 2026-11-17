@@ -4,8 +4,9 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var timer: Timer?
-    private var claude: Result<ClaudeUsage, Error>?
-    private var codex: Result<CodexUsage, Error>?
+    private var claude = Feed<ClaudeUsage>()
+    private var codex = Feed<CodexUsage>()
+    private var loaded = false
     private var lastRefresh: Date?
     private var refreshing = false
 
@@ -13,20 +14,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
         render()
-        refresh()
+        refresh(force: true)
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in self?.refresh(force: false) }
         }
     }
 
-    @objc func refresh() {
+    @objc func refreshNow() { refresh(force: true) }
+
+    // Scheduled refreshes skip a service that is waiting out a 429; a manual
+    // refresh always asks.
+    private func refresh(force: Bool) {
         guard !refreshing else { return }
+        let start = Date()
+        let askClaude = force || claude.isDue(start)
+        let askCodex = force || codex.isDue(start)
+        guard askClaude || askCodex else { return }
         refreshing = true
         Task {
-            let claudeResult = await attempt { try await fetchClaudeUsage() }
-            let codexResult = await attempt { try await fetchCodexUsage() }
-            claude = claudeResult
-            codex = codexResult
+            if askClaude { claude.record(await attempt { try await fetchClaudeUsage() }, now: Date()) }
+            if askCodex { codex.record(await attempt { try await fetchCodexUsage() }, now: Date()) }
+            loaded = true
             lastRefresh = Date()
             refreshing = false
             render()
@@ -35,8 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func render() {
         guard let item = statusItem else { return }
-        let claudeUsage = try? claude?.get()
-        let codexUsage = try? codex?.get()
+        let claudeUsage = claude.usage
+        let codexUsage = codex.usage
         let title = NSMutableAttributedString()
         title.append(segment(ServiceIcons.claude, status: claudeUsage?.shortStatus ?? "n/a",
                              percent: claudeUsage?.percent, alarm: false))
@@ -70,31 +78,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         let now = Date()
 
-        addHeader(menu, "Claude" + ((try? claude?.get().plan)?.map { " (\($0.capitalized))" } ?? ""))
-        switch claude {
-        case .success(let usage)?: claudeLines(usage, now: now).forEach { addInfo(menu, $0) }
-        case .failure(let error)?: addInfo(menu, "Unavailable: \(error.localizedDescription)")
-        case nil: addInfo(menu, "Loading...")
-        }
+        addHeader(menu, "Claude" + (claude.usage?.plan.map { " (\($0.capitalized))" } ?? ""))
+        addFeed(menu, claude, now: now) { claudeLines($0, now: now) }
         menu.addItem(.separator())
 
-        addHeader(menu, "Codex" + ((try? codex?.get().planType)?.map { " (\($0.capitalized))" } ?? ""))
-        switch codex {
-        case .success(let usage)?: codexLines(usage, now: now).forEach { addInfo(menu, $0) }
-        case .failure(let error)?: addInfo(menu, "Unavailable: \(error.localizedDescription)")
-        case nil: addInfo(menu, "Loading...")
-        }
+        addHeader(menu, "Codex" + (codex.usage?.planType.map { " (\($0.capitalized))" } ?? ""))
+        addFeed(menu, codex, now: now) { codexLines($0, now: now) }
         menu.addItem(.separator())
 
         if let lastRefresh {
             addInfo(menu, "Refreshed \(formatReset(lastRefresh, now: now.addingTimeInterval(1)))")
         }
-        let refreshItem = NSMenuItem(title: "Refresh now", action: #selector(refresh), keyEquivalent: "r")
+        let refreshItem = NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
         return menu
+    }
+
+    private func addFeed<Usage>(_ menu: NSMenu, _ feed: Feed<Usage>, now: Date, lines: (Usage) -> [String]) {
+        if let usage = feed.usage {
+            lines(usage).forEach { addInfo(menu, $0) }
+            if feed.isStale, let usageAt = feed.usageAt {
+                var note = "Stale since \(formatReset(usageAt, now: now)), rate limited"
+                if let retryAt = feed.retryAt { note += "; retrying after \(formatReset(retryAt, now: now))" }
+                addInfo(menu, note)
+            }
+        } else if let error = feed.error {
+            addInfo(menu, "Unavailable: \(error.localizedDescription)")
+            if let retryAt = feed.retryAt { addInfo(menu, "Retrying after \(formatReset(retryAt, now: now))") }
+        } else {
+            addInfo(menu, loaded ? "Not checked yet" : "Loading...")
+        }
     }
 
     private func addHeader(_ menu: NSMenu, _ text: String) {

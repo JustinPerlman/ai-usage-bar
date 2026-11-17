@@ -54,8 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.attributedTitle = title
         // Keep one point on each outer edge; inter-item spacing belongs to macOS.
         item.length = ceil(title.size().width) + 2
+        let now = Date()
         let description = menubarText(claude: claudeUsage?.shortStatus ?? "n/a",
-                                      codex: codexUsage?.shortStatus ?? "n/a")
+                                      codex: codexUsage?.shortStatus ?? "n/a",
+                                      claudePace: claudeUsage.flatMap { worstPace(claudePace($0, now: now)) },
+                                      codexPace: codexUsage.flatMap { worstPace(codexPace($0, now: now)) })
         item.button?.toolTip = description
         item.button?.setAccessibilityLabel(description)
         item.menu = buildMenu()
@@ -78,12 +81,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         let now = Date()
 
-        addHeader(menu, "Claude" + (claude.usage?.plan.map { " (\($0.capitalized))" } ?? ""))
-        addFeed(menu, claude, now: now) { claudeLines($0, now: now) }
+        let claudeReadings = claude.usage.map { claudePace($0, now: now) } ?? []
+        addHeader(menu, "Claude" + (claude.usage?.plan.map { " (\($0.capitalized))" } ?? ""),
+                  pace: worstPace(claudeReadings))
+        addFeed(menu, claude, now: now) { claudeLines($0, now: now) + claudeReadings.map(\.line) }
         menu.addItem(.separator())
 
-        addHeader(menu, "Codex" + (codex.usage?.planType.map { " (\($0.capitalized))" } ?? ""))
-        addFeed(menu, codex, now: now) { codexLines($0, now: now) }
+        let codexReadings = codex.usage.map { codexPace($0, now: now) } ?? []
+        addHeader(menu, "Codex" + (codex.usage?.planType.map { " (\($0.capitalized))" } ?? ""),
+                  pace: worstPace(codexReadings))
+        addFeed(menu, codex, now: now) { codexLines($0, now: now) + codexReadings.map(\.line) }
         menu.addItem(.separator())
 
         if let lastRefresh {
@@ -113,11 +120,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func addHeader(_ menu: NSMenu, _ text: String) {
+    private func addHeader(_ menu: NSMenu, _ text: String, pace: Pace?) {
         let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
-        item.attributedTitle = NSAttributedString(string: text, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
+        let font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        let title = NSMutableAttributedString()
+        if let pace {
+            title.append(NSAttributedString(string: "● ", attributes: [.font: font, .foregroundColor: color(pace)]))
+        }
+        title.append(NSAttributedString(string: text, attributes: [.font: font]))
+        if let pace {
+            title.append(NSAttributedString(string: "  \(pace.label)",
+                                            attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                                                         .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        item.attributedTitle = title
         item.isEnabled = false
         menu.addItem(item)
+    }
+
+    private func color(_ pace: Pace) -> NSColor {
+        switch pace {
+        case .green: return .systemGreen
+        case .yellow: return .systemYellow
+        case .orange: return .systemOrange
+        case .red: return .systemRed
+        }
     }
 
     private func addInfo(_ menu: NSMenu, _ text: String) {

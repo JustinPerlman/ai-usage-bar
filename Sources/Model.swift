@@ -330,6 +330,121 @@ func daysUntil(_ date: Date, from now: Date) -> Int {
     Int(ceil(date.timeIntervalSince(now) / 86_400))
 }
 
+// MARK: - Pace
+
+// How usage compares with the weekdays left before a limit resets. The ratio
+// is the share of the limit left over the share of weekday time left: 1.0 means
+// exactly on pace, below 1.0 means usage is running ahead of the calendar.
+enum Pace: Int, Comparable, Sendable {
+    case green, yellow, orange, red
+
+    static func < (lhs: Pace, rhs: Pace) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    var label: String {
+        switch self {
+        case .green: return "on pace"
+        case .yellow: return "running a bit fast"
+        case .orange: return "running fast"
+        case .red: return "running out"
+        }
+    }
+}
+
+func paceFor(usedPercent: Double, weekdaysLeft: Double) -> Pace {
+    if usedPercent >= 100 { return .red }
+    guard weekdaysLeft > 0 else { return .green }
+    let ratio = (100 - usedPercent) / 100 / weekdaysLeft
+    if ratio >= 0.9 { return .green }
+    if ratio >= 0.7 { return .yellow }
+    if ratio >= 0.4 { return .orange }
+    return .red
+}
+
+struct PaceReading: Equatable, Sendable {
+    let label: String
+    let usedPercent: Double
+    let weekdaysLeft: Double     // 0...1, share of the cycle's weekday time still ahead
+    var pace: Pace { paceFor(usedPercent: usedPercent, weekdaysLeft: weekdaysLeft) }
+
+    var line: String { "\(label) \(Int(usedPercent))% used · \(Int((weekdaysLeft * 100).rounded()))% of weekdays left" }
+}
+
+// Share of the Monday-to-Friday time in [start, end) that falls after `now`,
+// counting partial days, in the given time zone. Nil when the cycle has no weekdays.
+func weekdaysLeft(start: Date, end: Date, now: Date, timeZone: TimeZone = .current) -> Double? {
+    guard end > start else { return nil }
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    let from = min(max(now, start), end)
+    var total = 0.0, remaining = 0.0
+    var day = calendar.startOfDay(for: start)
+    var guardDays = 0
+    while day < end, guardDays < 400 {
+        guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+        if !calendar.isDateInWeekend(day) {
+            total += max(0, min(next, end).timeIntervalSince(max(day, start)))
+            remaining += max(0, min(next, end).timeIntervalSince(max(day, from)))
+        }
+        day = next
+        guardDays += 1
+    }
+    return total > 0 ? remaining / total : nil
+}
+
+private func monthBefore(_ date: Date) -> Date? {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = utc
+    return calendar.date(byAdding: .month, value: -1, to: date)
+}
+
+private func reading(_ label: String, used: Double, start: Date?, end: Date?, now: Date,
+                     timeZone: TimeZone) -> PaceReading? {
+    guard let start, let end, let left = weekdaysLeft(start: start, end: end, now: now, timeZone: timeZone)
+    else { return nil }
+    return PaceReading(label: label, usedPercent: used, weekdaysLeft: left)
+}
+
+// Limits a day or longer. The 5-hour windows are too short for weekdays to mean anything.
+func claudePace(_ usage: ClaudeUsage, now: Date, timeZone: TimeZone = .current) -> [PaceReading] {
+    var readings: [PaceReading] = []
+    if let spend = usage.spend, spend.limitMinor > 0 {
+        let end = nextMonthStartUTC(after: now)
+        let used = Double(spend.usedMinor) * 100 / Double(spend.limitMinor)
+        if let r = reading("Spend", used: used, start: monthBefore(end), end: end, now: now, timeZone: timeZone) {
+            readings.append(r)
+        }
+    }
+    for window in usage.windows where window.label == "Weekly limit" {
+        let start = window.resetsAt?.addingTimeInterval(-604_800)
+        if let r = reading("Weekly limit", used: window.utilization, start: start, end: window.resetsAt,
+                           now: now, timeZone: timeZone) {
+            readings.append(r)
+        }
+    }
+    return readings
+}
+
+// Codex does not report the spending cycle's length; it resets on the 1st, so
+// the cycle is taken to be the calendar month before the reset.
+func codexPace(_ usage: CodexUsage, now: Date, timeZone: TimeZone = .current) -> [PaceReading] {
+    var readings: [PaceReading] = []
+    if let spend = usage.spend, let reset = spend.resetAt,
+       let r = reading("Spend", used: spend.usedPercent, start: monthBefore(reset), end: reset,
+                       now: now, timeZone: timeZone) {
+        readings.append(r)
+    }
+    for window in [usage.primary, usage.secondary].compactMap({ $0 }) {
+        guard let seconds = window.windowSeconds, seconds >= 86_400, let reset = window.resetAt else { continue }
+        if let r = reading(window.label, used: window.usedPercent, start: reset.addingTimeInterval(-Double(seconds)),
+                           end: reset, now: now, timeZone: timeZone) {
+            readings.append(r)
+        }
+    }
+    return readings
+}
+
+func worstPace(_ readings: [PaceReading]) -> Pace? { readings.map(\.pace).max() }
+
 // MARK: - Formatting
 
 func formatMoney(_ amount: Double, currency: String) -> String {
@@ -348,8 +463,11 @@ func formatReset(_ date: Date, now: Date, timeZone: TimeZone = .current) -> Stri
     return formatter.string(from: date)
 }
 
-func menubarText(claude: String, codex: String) -> String {
-    "Claude \(claude)  Codex \(codex)"
+func menubarText(claude: String, codex: String, claudePace: Pace? = nil, codexPace: Pace? = nil) -> String {
+    func part(_ name: String, _ status: String, _ pace: Pace?) -> String {
+        "\(name) \(status)" + (pace.map { " (\($0.label))" } ?? "")
+    }
+    return part("Claude", claude, claudePace) + "  " + part("Codex", codex, codexPace)
 }
 
 func claudeLines(_ usage: ClaudeUsage, now: Date, timeZone: TimeZone = .current) -> [String] {

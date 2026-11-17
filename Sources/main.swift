@@ -7,15 +7,17 @@ if CommandLine.arguments.contains("--check") {
         let now = Date()
         switch await attempt({ try await fetchClaudeUsage() }) {
         case .success(let usage):
-            print("Claude \(usage.plan ?? "") \(usage.shortStatus)")
-            claudeLines(usage, now: now).forEach { print("  \($0)") }
+            let readings = claudePace(usage, now: now)
+            print("Claude \(usage.plan ?? "") \(usage.shortStatus)" + (worstPace(readings).map { " (\($0.label))" } ?? ""))
+            (claudeLines(usage, now: now) + readings.map(\.line)).forEach { print("  \($0)") }
         case .failure(let error):
             print("Claude unavailable: \(error.localizedDescription)")
         }
         switch await attempt({ try await fetchCodexUsage() }) {
         case .success(let usage):
-            print("Codex \(usage.planType ?? "") \(usage.shortStatus)")
-            codexLines(usage, now: now).forEach { print("  \($0)") }
+            let readings = codexPace(usage, now: now)
+            print("Codex \(usage.planType ?? "") \(usage.shortStatus)" + (worstPace(readings).map { " (\($0.label))" } ?? ""))
+            (codexLines(usage, now: now) + readings.map(\.line)).forEach { print("  \($0)") }
         case .failure(let error):
             print("Codex unavailable: \(error.localizedDescription)")
         }
